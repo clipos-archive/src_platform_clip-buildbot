@@ -1,0 +1,100 @@
+#!/usr/bin/perl -ls  
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2016-2018 ANSSI. All Rights Reserved.
+use lib '/usr/lib/clip-buildbot';
+use Net::OpenSSH;
+use File::Path qw(make_path);
+use File::Basename;
+
+sub update_local_mirror;
+sub get_packets;
+sub do_compile;
+sub check_coherency;
+sub parse_conf;
+
+use CLIP_BuildbotAuxFun;
+
+parse_conf();
+
+#
+# Input : ARGV[0] is specie/stuff e.g clip-rm/rm or clip-rm/clip
+#
+$ARGV[0] or die "I need at least the specie you want I to compile";
+
+#
+# Check if overlayfs is loaded otherwise say it nicely
+#
+
+`lsmod 2>&1 |grep overlay` or die "You should 'modprobe overlay' it is required for ephemeral containers";
+
+
+if ($update)
+{
+  print 'You told me to update the svn repo are you sure ? y/n [y]';
+  my $rep=<STDIN>;
+  update_local_mirror() if($rep=~/[yo]/i)
+}
+
+#
+#Let's computes the set of pkg to compile
+my $name;
+$SIG{'INT'} = sub
+        {
+	 if($name){
+	 system("/usr/share/clip-buildbot/bin/wrapper-lxc-test-stop $name");
+	 };
+	 print 'BYE!';
+         exit(0);;
+	};
+
+my @pkgs;
+{
+  my $ssh=start_sdk_test_ssh($name);#$name is set in this function 
+ my $specfilename=$ssh->capture("find /opt/clip-int/specs -wholename '*$ARGV[0]*'");
+  chomp $specfilename;
+  my $tmpfilename=ssh_preprocessSpec($ssh,$specfilename);
+  my $spec=parseSpecString($ssh->capture("cat $tmpfilename"));
+  my @nodes=$spec->find("//pkgnames")->get_nodelist();
+  push @pkgs,split /\s+/,$_->string_value for(@nodes);
+}
+system("/usr/share/clip-buildbot/bin/wrapper-lxc-test-stop $name");
+@pkgs=grep {chomp; /[^[:blank:]]/} @pkgs;
+print "aaa $pkgs[0] zzz";
+print "aaa $pkgs[1] zzz";
+print "aaa $pkgs[2] zzz";
+
+for (@pkgs)
+{
+ {
+     my $ssh=start_sdk_test_ssh($name);#$name is set in this function 
+     $ssh->capture("cd /opt/clip-int && svn up"); 
+    compile_pkg_spec("nightly",$_,$ARGV[0],$ssh);
+ }
+  system("/usr/share/clip-buildbot/bin/wrapper-lxc-test-stop $name");
+}
+
+
+sub parse_conf
+{  
+  #Environment variables configuration for outside the SDK
+  $ENV{'CLIP-MIRROR-PATH'}="/var/lib/clip-buildbot/mirror" unless ($ENV{'CLIP-MIRROR-PATH'});
+  $ENV{'CLIP-SVN-PATH'}="/var/lib/clip-buildbot/clip-int/" unless ($ENV{'CLIP-SVN-PATH'});
+  $ENV{'CLIP-BUILDBOT-MASTER-LXC'}="/var/lib/lxc/sdk-test" unless ($ENV{'CLIP-BUILDBOT-MASTER-LXC'});
+  $ENV{'CLIP-BUILDBOT-MIRROR-LXC'}="/var/lib/lxc/sdk-mirror" unless ($ENV{'CLIP-BUILDBOT-MIRROR-LXC'});
+  $ENV{'CLIP-BUILDBOT-LOG-DIR'}="/var/log/clip-buildbot" unless ($ENV{'CLIP-BUILDBOT-LOG-DIR'});
+  
+  #environment variable for inside SDK commands
+  $ENV{'CLIP-SDK-SPEC'}='clip-rm/rm' unless($ENV{'CLIP-SDK-SPEC'});
+  $ENV{'CLIP-SDK-CLIP-INT'}="/opt/clip-int" unless ($ENV{'CLIP-SDK-CLIP-INT'});
+ 
+#minimal sanitization of these variables
+ $ENV{'CLIP-MIRROR-PATH'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SVN-PATH'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-MASTER-LXC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-MIRROR-LXC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SDK-SPEC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SDK-CLIP-INT'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-LOG-DIR'}=~s/[^a-zA-Z0-9\/_-]//g;
+
+}
+

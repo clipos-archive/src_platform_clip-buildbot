@@ -1,0 +1,12 @@
+Source: clip-buildbot
+Version: 1.0.0-1
+Section: non-free/utils
+Priority: extra
+Maintainer: Philippe Trébuchet <clipos@ssi.gouv.fr>
+Build-Depends: debhelper (>=9)
+Standards-Version: 3.9.6
+Homepage: http://www.ssi.gouv.fr/
+Package: clip-buildbot
+Architecture: all
+Depends: lxc, perl, subversion, tar, xz-utils, libnet-openssh-perl, libio-pty-perl
+Description: Tool to check buildability of commits

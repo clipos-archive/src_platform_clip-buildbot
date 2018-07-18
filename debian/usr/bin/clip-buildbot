@@ -1,0 +1,80 @@
+#!/usr/bin/perl -l 
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2016-2018 ANSSI. All Rights Reserved.
+my $lastrev=16076;
+use lib '/usr/lib/clip-buildbot';
+use Net::OpenSSH;
+use File::Path qw(make_path);
+use File::Basename;
+
+sub update_local_mirror;
+sub get_packets;
+sub do_compile;
+sub check_coherency;
+sub parse_conf;
+
+use CLIP_BuildbotAuxFun;
+
+
+
+#
+#
+#		Poller 
+#
+#
+
+parse_conf();
+while(1)
+{
+ my $currentrev;
+ my $output;
+ sleep(5);
+ #On a du taf
+ #On commence par determiner quels paquet ont ete impactés
+ system("cd $ENV{'CLIP-SVN-PATH'} && svn up --config-dir /var/lib/clip-buildbot/config >/dev/null");
+ $output=`cd $ENV{'CLIP-SVN-PATH'} && svn log --config-dir /var/lib/clip-buildbot/config --verbose -l 1`;
+ $output=~/r(\d+)/;
+ $currentrev=$1;
+ #
+ #Retour en attente  si pas d'increment de version
+ #
+ next if ($currentrev == $lastrev);
+# Update du miroir local 
+update_local_mirror($currentrev);
+ 
+ $output=`cd $ENV{"CLIP-SVN-PATH"} && svn log --config-dir /var/lib/clip-buildbot/config --verbose -l \$(($currentrev-$lastrev))`;
+$packets=get_packets($output);
+ $lastrev=$currentrev;
+ print "$currentrev est la revision en cours";
+ 
+ for (sort { $a=~s/r//r <=> $b=~s/r//r } keys %{$packets})
+ {
+   docompile($_,$packets->{$_});
+ }
+	print "--------------------------------------------------";
+}
+
+sub parse_conf
+{  
+  #Environment variables configuration for outside the SDK
+  $ENV{'CLIP-MIRROR-PATH'}="/var/lib/clip-buildbot/mirror" unless ($ENV{'CLIP-MIRROR-PATH'});
+  $ENV{'CLIP-SVN-PATH'}="/var/lib/clip-buildbot/clip-int/" unless ($ENV{'CLIP-SVN-PATH'});
+  $ENV{'CLIP-BUILDBOT-MASTER-LXC'}="/var/lib/lxc/sdk-test" unless ($ENV{'CLIP-BUILDBOT-MASTER-LXC'});
+  $ENV{'CLIP-BUILDBOT-MIRROR-LXC'}="/var/lib/lxc/sdk-mirror" unless ($ENV{'CLIP-BUILDBOT-MIRROR-LXC'});
+  $ENV{'CLIP-BUILDBOT-LOG-DIR'}="/var/log/clip-buildbot" unless ($ENV{'CLIP-BUILDBOT-LOG-DIR'});
+  
+  #environment variable for inside SDK commands
+  $ENV{'CLIP-SDK-SPEC'}='clip-rm/rm' unless($ENV{'CLIP-SDK-SPEC'});
+  $ENV{'CLIP-SDK-CLIP-INT'}="/opt/clip-int" unless ($ENV{'CLIP-SDK-CLIP-INT'});
+ 
+#minimal sanitization of these variables
+ $ENV{'CLIP-MIRROR-PATH'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SVN-PATH'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-MASTER-LXC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-MIRROR-LXC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SDK-SPEC'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-SDK-CLIP-INT'}=~s/[^a-zA-Z0-9\/_-]//g;
+ $ENV{'CLIP-BUILDBOT-LOG-DIR'}=~s/[^a-zA-Z0-9\/_-]//g;
+
+}
+

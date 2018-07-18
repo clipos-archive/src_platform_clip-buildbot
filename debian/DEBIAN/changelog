@@ -1,0 +1,5 @@
+buildbot (0.0.0-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Philippe Trébuchet <clipos@ssi.gouv.fr>  Thu, 28 Mar 2016 14:01:51 +0100

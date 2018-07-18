@@ -1,0 +1,17 @@
+Template: buildbot/user_svn
+Type: string
+Description: User 
+ Give here the user used to connect to the SVN repository
+
+
+Template: buildbot/password_svn
+Type: password
+Description: Password  
+ Give the password Used to connect to the SVN repository
+
+Template: buildbot/url_sdk
+Type: string
+Default: https://clip.ssi.gouv.fr/clip/clip-sdk/4.4.2/clip-sdk-4.4.2_P0-20151020.txz
+Description: URL 
+ Give the url the sdk rootfs will be fetched from
+

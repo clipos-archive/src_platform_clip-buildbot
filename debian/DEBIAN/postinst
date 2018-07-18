@@ -1,0 +1,257 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2016-2018 ANSSI. All Rights Reserved.
+set -x
+
+#source debconf library 
+. /usr/share/debconf/confmodule
+
+set_svn_config_options()
+{
+  #db_x_loadtemplatefile templates
+
+    db_input high buildbot/user_svn
+    db_input high buildbot/password_svn
+    db_go
+
+#Fetching configuration
+    db_get buildbot/user_svn 
+    USERSVN=$RET
+
+    db_get buildbot/password_svn 
+    PASSWORDSVN=$RET
+
+    mkdir -p /etc/clip-buildbot/creds
+    chmod 0750 /etc/clip-buildbot/creds
+    printf "user = %s\n" "$USERSVN" >/etc/clip-buildbot/creds/svn.creds
+    printf "password = %s\n" "$PASSWORDSVN" >>/etc/clip-buildbot/creds/svn.creds
+    chown -R root:buildbot /etc/clip-buildbot
+    if grep -qs '^([^#])*ssl-authority-files = ' /etc/subversion/servers; then
+      sed -i -e 's!\(ssl-authority-files = .*)$!\1;/usr/share/ca-certificates/ca-svn.pem!' /etc/subversion/servers
+   else
+     perl -i -pe'/\[global\]/ and $_.="ssl-authority-files = /usr/share/ca-certificates/ca-svn.pem\n;"' /etc/subversion/servers
+   fi
+}
+
+setup_buildbot_user() {
+        if ! getent passwd buildbot >/dev/null; then
+	                    adduser --quiet --system --group --no-create-home --home /var/run/clip-buildbot --shell /usr/sbin/nologin buildbot
+	fi
+#appeler clip-buildbot l'utilisateur
+    UID=`id -u buildbot`
+    GID=`id -g buildbot`
+chown 700 /usr/share/clip-buildbot
+chown $UID:$GID /usr/share/clip-builbot
+chown $UID:$GID /usr/share/clip-builbot/bin
+chown $UID:$GID /usr/bin/clip-buildbot
+chown -R $UID:$GID /usr/lib/clip-buildbot
+}
+make_overlayfs_loaded()
+{
+  grep -qsw '^overlay' /etc/modules || echo overlay >>/etc/modules
+}
+
+checkout_clip_int()
+#appeler clip-buildbot l utilisateur
+(
+
+  UID=`id -u buildbot`
+  GID=`id -g buildbot`
+
+  mkdir -p /var/lib/clip-buildbot/config
+  cp /etc/subversion/* /var/lib/clip-buildbot/config
+  perl -i -pe 's/# *(store-passwords = ).*/\1yes/' /var/lib/clip-buildbot/config/servers 
+  cd /var/lib/clip-buildbot
+  #buildbot account is disabled 
+  svn co --username "$USERSVN" https://clip.ssi.gouv.fr/clip-int --depth immediates --config-dir /var/lib/clip-buildbot/config --password $PASSWORDSVN --config-option servers:global:store-plaintext-passwords=yes
+  #chmod here
+  chown -R $UID:$GID /var/lib/clip-buildbot/
+
+
+# we do not need a true repo here just something that allows us to track revisions
+cd clip-int/branches
+svn up clip4 --depth immediates --config-dir /var/lib/clip-buildbot/config
+exit 0;
+)
+
+create_local_mirror()
+{
+	cd /var/lib/clip-buildbot
+	echo "Creating local mirror.....may take an age...."
+#check for early terminaison 
+  if [ -d mirror ]; then
+  #On a trouvé un repertoire qui ressemble au mirroir
+    if svnadmin verify /var/lib/clip-buildbot/mirror -r 16100 >/dev/null 2>&1; then
+      return 0  
+    fi
+  fi
+  svnrdump dump https://clip.ssi.gouv.fr/clip-int --config-dir /var/lib/clip-buildbot/config --incremental -r 1:16100 >mydump
+
+#16100 is an arbitrary value that is also the one the buildbot will start with
+#no problem here the buildbot will fetch any upper version 
+	mkdir mirror
+	svnadmin create mirror --compatible-version 1.8
+#1.8 is the current version 
+	svnadmin load mirror < mydump
+	rm mydump
+}
+
+set_ssh_keys_sdks()
+{
+:
+  # cd /var/lib/clip-buildbot/
+}
+
+create_bridge_interface()
+{
+  if ! grep -q 'iface nat-lxc' /etc/network/interfaces; then 
+    cat >>/etc/network/interfaces <<EOF
+
+auto nat-lxc
+allow-hotplug nat-lxc
+iface nat-lxc inet static
+      bridge_ports none
+      bridge_fd 0
+      bridge_maxwait 0
+      address 172.16.1.1
+      netmask 255.255.255.0
+      up /sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+      up /sbin/iptables -I FORWARD -i nat-lxc -o eth0 -j ACCEPT
+      up /sbin/iptables -I FORWARD -o nat-lxc -i eth0 -j ACCEPT
+      up /sbin/iptables -I INPUT -i nat-lxc -j ACCEPT
+
+EOF
+ifup nat-lxc
+fi
+}
+
+setup_sdk()
+{
+  db_input high buildbot/url_sdk
+  db_get buildbot/url_sdk
+  URLSDK=$RET
+  db_go
+  cd /var/lib/lxc
+#get the root fs
+  wget "$URLSDK" --no-check-certificate --config=/etc/clip-buildbot/creds/svn.creds
+  cd sdk-test/
+  echo Extracting roots in $PWD
+  tar xf ../"${URLSDK##*/}"
+  mkdir -p rootfs/var/lib/clip-buildbot/mirror/
+  cd ../sdk-mirror/
+  echo Extracting roots in $PWD
+  tar xf ../"${URLSDK##*/}"
+  mkdir -p rootfs/var/lib/clip-buildbot/mirror/
+  mkdir -p rootfs/home/lambda/build/debs/clip/
+  mkdir -p rootfs/home/lambda/build/debs/rm/
+  rm ../"${URLSDK##*/}"
+  db_input high buildbot/url_mirrors
+  db_get buildbot/url_mirrors
+  URLMIRRORS="$RET"
+  db_go
+  mkdir -p rootfs/localmirror
+  cd rootfs/localmirror 
+  #get the mirrors
+  wget https://clip.ssi.gouv.fr/clip4-rm-dpkg/branches/stable-4.4.2/clip --no-check-certificate -r -nH --cut-dir=3 --config=/etc/clip-buildbot/creds/svn.creds -l 1 -R '*.iso' 
+  wget https://clip.ssi.gouv.fr/clip4-rm-dpkg/branches/stable-4.4.2/rm --no-check-certificate -r -nH --cut-dir=3 --config=/etc/clip-buildbot/creds/svn.creds -l 1 -R '*.iso' 
+}
+
+adjust_owners()
+{
+   mkdir -p /var/run/clip-buildbot
+   mkdir -p /var/log/clip-buildbot
+   chown buildbot:buildbot /var/log/clip-buildbot
+   chown buildbot:buildbot /var/lib/clip-buildbot
+   chown -R buildbot:buildbot /etc/clip-buildbot/creds
+   chown -R buildbot:buildbot /var/run/clip-buildbot/
+   chown -R buildbot:buildbot /var/lib/clip-buildbot/config
+   chown -R buildbot:buildbot /var/lib/clip-buildbot/mirror
+   chown -R buildbot:buildbot /var/lib/lxc/sdk-test/rootfs/var/lib/clip-buildbot 
+   chown -R buildbot:buildbot /var/lib/lxc/sdk-mirror/rootfs/var/lib/clip-buildbot   chown 0:0 /usr/share/clip-buildbot/bin/*
+   chmod +s /usr/share/clip-buildbot/bin/*
+     
+}
+
+checkout_local_svn()
+{
+  UID=`id -u buildbot`
+  GID=`id -g buildbot`
+  #check out for test framework
+  lxc-start -n sdk-test
+  lxc-attach -n sdk-test -- perl -i -pe 's/^root:.*?:/root:\$1\$1nWuDJFD\$z8oojI.EYXHZlaEGES2sS0:/' /etc/shadow
+  lxc-attach -n sdk-test -- [ -d /mnt/clip-int ] && rm -rf /mnt/clip-int
+  lxc-attach -n sdk-test -- sh -c "cd /mnt/&& svn co file:///var/lib/clip-buildbot/mirror clip-int --depth=immediates"
+  lxc-attach -n sdk-test -- sh -c "cd /mnt/clip-int/branches && svn up clip4 --depth=infinity"
+  lxc-attach -n sdk-test -- useradd lambda 
+  lxc-attach -n sdk-test -- mkdir -p /home/lambda
+  lxc-attach -n sdk-test -- usermod -u $UID lambda -o
+  lxc-attach -n sdk-test -- groupmod -g $GID lambda -o 2>/dev/null
+  lxc-attach -n sdk-test -- usermod -g $GID lambda 
+  lxc-attach -n sdk-test --  mkdir -p /home/lambda/build/debs/clip/
+  mkdir -p /var/lib/lxc/sdk-test/rootfs/mnt/clip-int
+  lxc-attach -n sdk-test -- chown -R lambda:lambda /mnt/clip-int
+  lxc-attach -n sdk-test -- rmdir /opt/clip-int
+  lxc-attach -n sdk-test -- ln -s /mnt/clip-int/branches/clip4 /opt/clip-int
+  lxc-attach -n sdk-test -- ln -s /opt/clip-int/distfiles/xauth-1.0.8.tar.bz2  /opt/clip-int/distfiles-dev/xauth-1.0.8.tar.bz2
+  lxc-attach -n sdk-test -- ln -s /opt/clip-int/distfiles/openssh-6.8_p1-sctp.patch.xz /opt/clip-int/distfiles-dev/openssh-6.8_p1-sctp.patch.xz
+  lxc-attach -n sdk-test -- ln -s /opt/clip-int/distfiles/openssh-7.1p1-hpnssh14v9.tar.xz /opt/clip-int/distfiles-dev/openssh-7.1p1-hpnssh14v9.tar.xz
+  lxc-attach -n sdk-test -- ln -s /opt/clip-int/distfiles/openssh-7.1p1.tar.gz /opt/clip-int/distfiles-dev/openssh-7.1p1.tar.gz
+  lxc-attach -n sdk-test -- perl -i -pe 's/#\s*CLIP_BASE=.*/CLIP_BASE="\/opt\/clip-int"/' /etc/clip-build.conf
+  lxc-attach -n sdk-test -- perl -i -pe 's/#\s*DEBS_BASE=.*/DEBS_BASE="\/home\/lambda\/build\/debs"/' /etc/clip-build.conf
+  lxc-attach -n sdk-test -- perl -i -pe 's/#\s*CLIP_BUILDER=.*/CLIP_BUILDER="buildbot buildbot@nowhere.clip"/' /etc/clip-build.conf
+ 
+  lxc-attach -n sdk-test -- emerge openssh
+  lxc-attach -n sdk-test -- service sshd start
+  lxc-attach -n sdk-test -- rc-update add sshd default
+  lxc-attach -n sdk-test -- perl -i -pe 's/#?(PermitRootLogin).*/\1 yes/' /etc/ssh/sshd_config
+  lxc-attach -n sdk-test -- perl -i -pe 's/#?(PasswordAuthentication).*/\1 yes/' /etc/ssh/sshd_config
+  lxc-stop -k -n sdk-test
+  #check out for mirror creation 
+  #perhaps unneeded
+  lxc-start -n sdk-mirror
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/^root:.*?:/root:\$1\$1nWuDJFD\$z8oojI.EYXHZlaEGES2sS0:/' /etc/shadow
+  lxc-attach -n sdk-mirror -- [ -d /mnt/clip-int ] && rm -rf /mnt/clip-int
+  lxc-attach -n sdk-mirror -- sh -c "cd /mnt/&& svn co file:///var/lib/clip-buildbot/mirror clip-int --depth=immediates"
+  lxc-attach -n sdk-mirror -- sh -c "cd /mnt/clip-int/branches && svn up clip4 --depth=infinity"
+  lxc-attach -n sdk-mirror -- useradd lambda
+  lxc-attach -n sdk-mirror -- usermod -u $UID lambda -o
+  lxc-attach -n sdk-mirror -- groupmod -g $GID lambda -o 2>/dev/null
+  lxc-attach -n sdk-mirror -- usermod -g $GID lambda  
+  mkdir -p /var/lib/lxc/sdk-mirror/rootfs/mnt/clip-int
+  lxc-attach -n sdk-mirror -- chown -R lambda:lambda /mnt/clip-int
+  lxc-attach -n sdk-mirror -- chown -R lambda:lambda /localmirror
+  lxc-attach -n sdk-mirror -- rmdir /opt/clip-int
+  lxc-attach -n sdk-mirror -- ln -s /mnt/clip-int/branches/clip4 /opt/clip-int
+  lxc-attach -n sdk-mirror -- ln -s /opt/clip-int/distfiles/xauth-1.0.8.tar.bz2  /opt/clip-int/distfiles-dev/xauth-1.0.8.tar.bz2
+  lxc-attach -n sdk-mirror -- ln -s /opt/clip-int/distfiles/openssh-6.8_p1-sctp.patch.xz /opt/clip-int/distfiles-dev/openssh-6.8_p1-sctp.patch.xz
+  lxc-attach -n sdk-mirror -- ln -s /opt/clip-int/distfiles/openssh-7.1p1-hpnssh14v9.tar.xz /opt/clip-int/distfiles-dev/openssh-7.1p1-hpnssh14v9.tar.xz
+  lxc-attach -n sdk-mirror -- ln -s /opt/clip-int/distfiles/openssh-7.1p1.tar.gz /opt/clip-int/distfiles-dev/openssh-7.1p1.tar.gz
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/#\s*CLIP_BASE=.*/CLIP_BASE="\/opt\/clip-int"/' /etc/clip-build.conf
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/#\s*DEBS_BASE=.*/DEBS_BASE="\/home\/lambda\/build\/debs"/' /etc/clip-build.conf
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/#\s*CLIP_BUILDER=.*/CLIP_BUILDER="buildbot buildbot@nowhere.clip"/' /etc/clip-build.conf
+  lxc-attach -n sdk-mirror -- emerge openssh
+  lxc-attach -n sdk-mirror -- service sshd start
+  lxc-attach -n sdk-mirror -- rc-update add sshd default 
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/#?(PermitRootLogin).*/\1 yes/' /etc/ssh/sshd_config
+  lxc-attach -n sdk-mirror -- perl -i -pe 's/#?(PasswordAuthentication).*/\1 yes/' /etc/ssh/sshd_config
+  lxc-attach -n sdk-mirror --  mkdir -p /home/lambda/build/debs/clip/
+  lxc-stop -k -n sdk-mirror
+  
+  cat /var/lib/lxc/sdk-test/rootfs/etc/ssh/ssh_host_rsa_key.pub >> /etc/clip-buildbot/creds/sdk_keys
+  cat /var/lib/lxc/sdk-mirror/rootfs/etc/ssh/ssh_host_rsa_key.pub >> /etc/clip-buildbot/creds/sdk_keys
+
+}
+
+make_overlayfs_loaded
+setup_buildbot_user
+set_svn_config_options
+checkout_clip_int
+create_local_mirror
+set_ssh_keys_sdks
+create_bridge_interface
+setup_sdk
+checkout_local_svn
+adjust_owners
+
+echo "ready to go!"
+

@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2016-2018 ANSSI. All Rights Reserved.
+set -x
+
+#source debconf library 
+. /usr/share/debconf/confmodule
+
+rm -rf /etc/clip-buildbot/creds
+sed -i -e 's!;/usr/share/ca-certificates/ca-svn.pem!!' /etc/subversion/servers
+deluser --quiet buildbot
+rm -rf /usr/share/clip-buildbot
+rm -rf /var/lib/clip-buildbot/
+  
+rm -rf /var/lib/lxc/sdk-test  
+rm -rf /var/lib/lxc/sdk-mirror  
+
+echo "Remove process acheived!"
+
